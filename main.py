@@ -1,8 +1,10 @@
 import random
+import threading
+from decimal import Decimal
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 app = FastAPI(title="Item Management API", description="API for managing items with random fruit names")
 
@@ -14,34 +16,50 @@ FRUIT_NAMES = [
     "Quince", "Raspberry", "Strawberry", "Tangerine", "Watermelon"
 ]
 
-# In-memory storage for items
+# Thread-safe in-memory storage for items
 items_db: dict[int, dict] = {}
+items_lock = threading.Lock()
 item_id_counter = 0
+counter_lock = threading.Lock()
 
 
 class ItemCreate(BaseModel):
     name: Optional[str] = None  # If not provided, will use random fruit name
-    price: float
-    description: str
+    price: Decimal = Field(..., gt=0, description="Price must be a positive number")
+    description: str = Field(..., min_length=1, description="Description cannot be empty")
+
+    @field_validator("description")
+    @classmethod
+    def description_not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Description cannot be empty or whitespace only")
+        return v
 
 
 class ItemUpdate(BaseModel):
     name: Optional[str] = None
-    price: Optional[float] = None
-    description: Optional[str] = None
+    price: Optional[Decimal] = Field(None, gt=0, description="Price must be a positive number")
+    description: Optional[str] = Field(None, min_length=1, description="Description cannot be empty")
+
+    @field_validator("description")
+    @classmethod
+    def description_not_empty(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not v.strip():
+            raise ValueError("Description cannot be empty or whitespace only")
+        return v
 
 
 class Item(BaseModel):
     id: int
     name: str
-    price: float
+    price: Decimal
     description: str
 
 
 class ItemPrice(BaseModel):
     id: int
     name: str
-    price: float
+    price: Decimal
 
 
 class StatusResponse(BaseModel):
@@ -59,68 +77,79 @@ def get_status():
 def create_item(item: ItemCreate):
     """Create a new item. If name is not provided, a random fruit name will be used."""
     global item_id_counter
-    item_id_counter += 1
+    
+    with counter_lock:
+        item_id_counter += 1
+        new_id = item_id_counter
     
     name = item.name if item.name else random.choice(FRUIT_NAMES)
     
     new_item = {
-        "id": item_id_counter,
+        "id": new_id,
         "name": name,
         "price": item.price,
         "description": item.description
     }
-    items_db[item_id_counter] = new_item
+    
+    with items_lock:
+        items_db[new_id] = new_item
+    
     return Item(**new_item)
 
 
 @app.get("/items", response_model=list[Item])
 def get_items():
     """Get all items."""
-    return [Item(**item) for item in items_db.values()]
+    with items_lock:
+        return [Item(**item) for item in items_db.values()]
 
 
 @app.get("/items/{item_id}", response_model=Item)
 def get_item(item_id: int):
     """Get a specific item by ID."""
-    if item_id not in items_db:
-        raise HTTPException(status_code=404, detail="Item not found")
-    return Item(**items_db[item_id])
+    with items_lock:
+        if item_id not in items_db:
+            raise HTTPException(status_code=404, detail="Item not found")
+        return Item(**items_db[item_id])
 
 
 @app.put("/items/{item_id}", response_model=Item)
 def update_item(item_id: int, item: ItemUpdate):
     """Update an existing item."""
-    if item_id not in items_db:
-        raise HTTPException(status_code=404, detail="Item not found")
-    
-    existing_item = items_db[item_id]
-    
-    if item.name is not None:
-        existing_item["name"] = item.name
-    if item.price is not None:
-        existing_item["price"] = item.price
-    if item.description is not None:
-        existing_item["description"] = item.description
-    
-    items_db[item_id] = existing_item
-    return Item(**existing_item)
+    with items_lock:
+        if item_id not in items_db:
+            raise HTTPException(status_code=404, detail="Item not found")
+        
+        existing_item = items_db[item_id]
+        
+        if item.name is not None:
+            existing_item["name"] = item.name
+        if item.price is not None:
+            existing_item["price"] = item.price
+        if item.description is not None:
+            existing_item["description"] = item.description
+        
+        items_db[item_id] = existing_item
+        return Item(**existing_item)
 
 
 @app.delete("/items/{item_id}")
 def delete_item(item_id: int):
     """Delete an item."""
-    if item_id not in items_db:
-        raise HTTPException(status_code=404, detail="Item not found")
-    
-    del items_db[item_id]
+    with items_lock:
+        if item_id not in items_db:
+            raise HTTPException(status_code=404, detail="Item not found")
+        
+        del items_db[item_id]
     return {"message": "Item deleted successfully"}
 
 
 @app.get("/items/{item_id}/price", response_model=ItemPrice)
 def get_item_price(item_id: int):
     """Get the price of a specific item."""
-    if item_id not in items_db:
-        raise HTTPException(status_code=404, detail="Item not found")
-    
-    item = items_db[item_id]
-    return ItemPrice(id=item["id"], name=item["name"], price=item["price"])
+    with items_lock:
+        if item_id not in items_db:
+            raise HTTPException(status_code=404, detail="Item not found")
+        
+        item = items_db[item_id]
+        return ItemPrice(id=item["id"], name=item["name"], price=item["price"])
