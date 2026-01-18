@@ -16,7 +16,7 @@ app.add_middleware(
     allow_origins=["http://localhost:3000"],  # Restrict to specific origins in production
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["*"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 
@@ -116,7 +116,7 @@ def create_item(item: ItemCreate):
     # Check if we've reached the maximum number of items
     with items_lock:
         if len(items_db) >= MAX_ITEMS:
-            raise HTTPException(status_code=429, detail="Maximum number of items reached")
+            raise HTTPException(status_code=507, detail="Maximum number of items reached")
     
     with counter_lock:
         item_id_counter += 1
